@@ -95,4 +95,4 @@ ENV/
 train/
 test/
 .idea/
-tester/
+just_try/
