@@ -3,8 +3,9 @@ import os
 import argparse
 import errno
 import pandas as pd
-from utils import *
 from tqdm import tqdm
+from multiprocessing.pool import ThreadPool
+from time import time as timer
 
 argparser = argparse.ArgumentParser(description='Download specific objects from Open-Images dataset')
 argparser.add_argument('-a', '--annots',
@@ -39,7 +40,7 @@ elif not os.path.exists(LABELMAP):
     raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), LABELMAP)
 
 
-def get_object_codes(labelmap):
+def get_ooi_labelmap(labelmap):
     '''
     Given labelmap of all objects in Open Images dataset, get labelmap of objects of interest
 
@@ -56,37 +57,28 @@ def get_object_codes(labelmap):
     return object_codes
 
 
-def get_download_info(df, labelmap):
+def generate_download_list(annotations, labelmap, base_url):
     '''
-    Parse through input dataframe and get ImageID's of objects of interest
+    Parse through input annotations dataframe, find ImageID's of objects of interest,
+    and get download urls for the corresponding images
 
-    :param df: annotations dataframe
+    :param annotations: annotations dataframe
     :param labelmap: dictionary of object labels and codes
-    :return: dataframe with annotations
-    '''
-    ret_df = pd.DataFrame(columns=['ImageID', 'LabelName'])
-
-    for key, value in labelmap.items():
-        ret_df = ret_df.append(df.loc[df['LabelName'] == value, ['ImageID', 'LabelName']])
-
-    return ret_df
-
-
-def download_objects_of_interest(download_info, base_url):
-    '''
-    Download objects of interest
-
-    :param download_info: dataframe containing download info
     :param base_url: basename of url
-    :return: None
+    :return: list of urls to download
     '''
+    # create an empty dataframe
+    df_download = pd.DataFrame(columns=['ImageID', 'LabelName'])
 
-    download_pbar = TqdmUpTo(unit='B', unit_scale=True, miniters=1, position=3)
-    df_pbar = tqdm(total=download_info.size, position=1, desc="Dataframe progress")
+    # append dataframes to empty df according to conditions
+    for key, value in labelmap.items():
+        # find ImageID's in original annots dataframe corresponding to ooi's codes
+        df_download = df_download.append(annotations.loc[annotations['LabelName'] == value, ['ImageID', 'LabelName']])
 
-    for idx, row in download_info.iterrows():
-        df_pbar.update(1)
+    ######################
+    url_download_list = []
 
+    for idx, row in df_download.iterrows():
         # get name of the image
         image_name = row['ImageID'] + ".jpg"
 
@@ -95,14 +87,32 @@ def download_objects_of_interest(download_info, base_url):
             # form url
             url = os.path.join(base_url, image_name)
 
-            try:
-                download_pbar.set_description(url.split('/')[-1])
-                # download image
-                urllib.request.urlretrieve(url,
-                                           os.path.join(OUTPUT_DIR, image_name),
-                                           reporthook=download_pbar.update_to)
-            except:
-                pass  # TODO
+            url_download_list.append(url)
+
+    return url_download_list
+
+
+def download_objects_of_interest(download_list):
+    def fetch_url(url):
+        try:
+            urllib.request.urlretrieve(url, os.path.join(OUTPUT_DIR, url.split("/")[-1]))
+            return url, None
+        except Exception as e:
+            return None, e
+
+    start = timer()
+    results = ThreadPool(20).imap_unordered(fetch_url, download_list)
+
+    df_pbar = tqdm(total=len(download_list), position=1, desc="Download %: ")
+
+    for url, error in results:
+        df_pbar.update(1)
+        if error is None:
+            pass  # TODO: find a way to do tqdm.write() with a refresh
+            # print("{} fetched in {}s".format(url, timer() - start), end='\r')
+        else:
+            pass  # TODO: find a way to do tqdm.write() with a refresh
+            # print("error fetching {}: {}".format(url, error), end='\r')
 
 
 def main():
@@ -111,20 +121,24 @@ def main():
     base_url = os.path.dirname(df_images['image_url'][0])  # used to download the images
 
     # read labelmap
-    df_full_labelmap = pd.read_csv(LABELMAP)
-    # get labelmap for objects of interest (ooi)
-    ooi_labelmap = get_object_codes(df_full_labelmap)
-    print("\nDownloading the following objects:", [k for k, v in ooi_labelmap.items()])
+    df_oid_labelmap = pd.read_csv(LABELMAP)  # open images dataset (oid) labelmap
+    ooi_labelmap = get_ooi_labelmap(df_oid_labelmap)  # objects of interest (ooi) labelmap
 
     # read annotations
     df_annotations = pd.read_csv(ANNOTATIONS)
-    # get annotations of just objects of interest
-    df_download = get_download_info(df_annotations, ooi_labelmap)
+
+    print("\nGenerating download list for the following objects: ", [k for k, v in ooi_labelmap.items()])
+
+    # get url list to download
+    download_list = generate_download_list(annotations=df_annotations,
+                                           labelmap=ooi_labelmap,
+                                           base_url=base_url)
 
     # download objects of interest
-    download_objects_of_interest(download_info=df_download, base_url=base_url)
+    download_objects_of_interest(download_list)
 
     print("\nFinished downloads.")
+
 
 if __name__ == '__main__':
     main()
